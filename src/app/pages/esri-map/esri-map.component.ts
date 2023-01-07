@@ -11,18 +11,13 @@
   limitations under the License.
 */
 
-import {
-  Component,
-  OnInit,
-  ViewChild,
-  ElementRef,
-  OnDestroy
-} from "@angular/core";
-import { setDefaultOptions, loadModules } from 'esri-loader';
-import { Subscription } from "rxjs";
-import { FirebaseService, ITestItem } from "src/app/services/database/firebase";
-import { FirebaseMockService } from "src/app/services/database/firebase-mock";
-import esri = __esri; // Esri TypeScript Types
+import {Component, ElementRef, OnDestroy, OnInit, ViewChild} from "@angular/core";
+import {loadModules, setDefaultOptions} from 'esri-loader';
+import {Subscription} from "rxjs";
+import {FirebaseService, ITestItem} from "src/app/services/database/firebase";
+import {AuthenticationService} from "../../../auth";
+import {Router} from "@angular/router"; // Esri TypeScript Types
+import esri = __esri;
 
 @Component({
   selector: "app-esri-map",
@@ -46,7 +41,7 @@ export class EsriMapComponent implements OnInit, OnDestroy {
   _locator;
 
   // Instances
-  map: esri.Map;
+  map: any;
   view: esri.MapView;
   pointGraphic: esri.Graphic;
   graphicsLayer: esri.GraphicsLayer;
@@ -60,15 +55,25 @@ export class EsriMapComponent implements OnInit, OnDestroy {
   dir: number = 0;
   count: number = 0;
   timeoutHandler = null;
+  lastSearchedPoint: any = undefined;
 
   // firebase sync
   isConnected: boolean = false;
   subscriptionList: Subscription;
+  subscriptionSearch: Subscription;
   subscriptionObj: Subscription;
+  originPoint: any = undefined;
+  destinationPoint: any = undefined;
+  email: string;
 
   constructor(
-    private fbs: FirebaseService
-  ) { }
+    private fbs: FirebaseService,
+    public authenticationService: AuthenticationService,
+    private router: Router,
+  ) {
+    this.email = this.authenticationService.email;
+    this.email = this.email.replace('.', '_');
+  }
 
   async initializeMap() {
     try {
@@ -77,7 +82,7 @@ export class EsriMapComponent implements OnInit, OnDestroy {
       setDefaultOptions({ css: true });
 
       // Load the modules for the ArcGIS API for JavaScript
-      const [esriConfig, Map, MapView, FeatureLayer, Graphic, Point, GraphicsLayer, route, RouteParameters, FeatureSet] = await loadModules([
+      const [esriConfig, Map, MapView, FeatureLayer, Graphic, Point, GraphicsLayer, route, RouteParameters, FeatureSet, Track, Search, Locate] = await loadModules([
         "esri/config",
         "esri/Map",
         "esri/views/MapView",
@@ -87,7 +92,10 @@ export class EsriMapComponent implements OnInit, OnDestroy {
         "esri/layers/GraphicsLayer",
         "esri/rest/route",
         "esri/rest/support/RouteParameters",
-        "esri/rest/support/FeatureSet"
+        "esri/rest/support/FeatureSet",
+        "esri/widgets/Track",
+        "esri/widgets/Search",
+        "esri/widgets/Locate"
       ]);
 
       esriConfig.apiKey = "AAPK4895c8305fb6470e93b2e541f088febdKAZV1yCSvZSUCoTTbkKtUMMJGk620REJ8gd47X_xXuHxpoHTwM_gSa-0RkvY4-46";
@@ -109,7 +117,7 @@ export class EsriMapComponent implements OnInit, OnDestroy {
 
       this.map = new Map(mapProperties);
 
-   //   this.addFeatureLayers();
+      this.addFeatureLayers();
       this.addGraphicLayers();
 
      // this.addPoint(this.pointCoords[1], this.pointCoords[0], true);
@@ -128,18 +136,127 @@ export class EsriMapComponent implements OnInit, OnDestroy {
       // key and moves the pointer on the view.
       this.view.on('pointer-move', ["Shift"], (event) => {
         let point = this.view.toMap({ x: event.x, y: event.y });
-        console.log("map moved: ", point.longitude, point.latitude);
       });
 
-      await this.view.when(); // wait for map to load
-      console.log("ArcGIS map loaded");
-      console.log("Map center: " + this.view.center.latitude + ", " + this.view.center.longitude);
+      const weakThis = this;
+      const track = new Track({
+        view: this.view,
+        graphic: new Graphic({
+          symbol: {
+            type: "simple-marker",
+            color: "white",
+            size: "20px"
+          }
+        }),
+        visible: false,
+        useHeadingEnabled: false,
+        goToLocationEnabled: true,
+        goToOverride: function(view, options) {
+          weakThis.originPoint = options.target.target;
+          weakThis.graphicsLayer.removeAll();
+          weakThis.addGraphic("origin", weakThis.originPoint);
+          if (weakThis.destinationPoint !== undefined) {
+            weakThis.addGraphic("destination", weakThis.destinationPoint);
+            weakThis.getRoute();
+          }
+          return view.goTo(options.target);
+        }
+      });
+      const search = new Search({  //Add Search widget
+        view: this.view,
+        goToOverride: function(view, options) {
+          weakThis.destinationPoint = options.target.target.geometry.centroid;
+
+          weakThis.fbs.addLastSearch(weakThis.email, weakThis.destinationPoint.latitude, weakThis.destinationPoint.longitude);
+
+          weakThis.graphicsLayer.removeAll();
+          weakThis.addGraphic("destination", weakThis.destinationPoint);
+
+          if (weakThis.originPoint !== undefined) {
+            weakThis.addGraphic("origin", weakThis.originPoint);
+            weakThis.getRoute();
+          }
+          return view.goTo(options.target);
+        }
+      });
+      const locate = new Locate({
+        view: this.view,
+        useHeadingEnabled: false,
+      });
+      this.view.ui.add(locate, "top-left");
+      this.view.ui.add(search, "top-right");
+      this.view.ui.add(track, "top-left");
+      await this.view.when(() => {track.start();}); // wait for map to load
       return this.view;
     } catch (error) {
       console.log("EsriLoader: ", error);
     }
   }
+  routeUrl = "https://route-api.arcgis.com/arcgis/rest/services/World/Route/NAServer/Route_World";
 
+  getRoute() {
+    const routeParams = new this._RouteParameters({
+      stops: new this._FeatureSet({
+        features: this.graphicsLayer.graphics.toArray()
+      }),
+      returnDirections: true
+    });
+
+    this._Route.solve(this.routeUrl, routeParams).then((data: any) => {
+      for (let result of data.routeResults) {
+        result.route.symbol = {
+          type: "simple-line",
+          color: [5, 150, 255],
+          width: 3
+        };
+        this.graphicsLayer.add(result.route);
+      }
+
+      // Display directions
+      if (data.routeResults.length > 0) {
+        const directions: any = document.createElement("ol");
+        directions.classList = "esri-widget esri-widget--panel esri-directions__scroller";
+        directions.style.marginTop = "0";
+        directions.style.padding = "15px 15px 15px 30px";
+        const features = data.routeResults[0].directions.features;
+
+        // Show each direction
+        const direction = document.createElement("div");
+        direction.innerHTML = features[2].attributes.text + " (" + Math.floor(1609.34 * features[2].attributes.length) + " meters)";
+        directions.appendChild(direction);
+
+        let sumLength = 0;
+        let sumTime = 0;
+        // Show each direction
+        features.forEach((result: any, i: any) => {
+          sumLength += parseFloat(result.attributes.length);
+          sumTime += parseFloat(result.attributes.time);
+        });
+
+        const lengthtime = document.createElement("div");
+        lengthtime.innerHTML = Math.floor(1.60934 * sumLength * 100) / 100 + " km, " + Math.floor(sumTime) + " min";
+        directions.appendChild(lengthtime);
+
+        this.view.ui.empty("bottom-right");
+        this.view.ui.add(directions, "bottom-right");
+
+      }
+
+    }).catch((error: any) => {
+      console.log(error);
+    });
+  }
+  addGraphic(type, point) {
+    const graphic = new this._Graphic({
+      symbol: {
+        type: "simple-marker",
+        color: (type === "origin") ? "white" : "black",
+        size: "20px"
+      },
+      geometry: point
+    });
+    this.graphicsLayer.add(graphic);
+  }
   addGraphicLayers() {
     this.graphicsLayer = new this._GraphicsLayer();
     this.map.add(this.graphicsLayer);
@@ -147,30 +264,17 @@ export class EsriMapComponent implements OnInit, OnDestroy {
 
   addFeatureLayers() {
     // Trailheads feature layer (points)
-    var trailheadsLayer: __esri.FeatureLayer = new this._FeatureLayer({
+    var fogLayer: __esri.FeatureLayer = new this._FeatureLayer({
       url:
-        "https://services3.arcgis.com/GVgbJbqm8hXASVYi/arcgis/rest/services/Trailheads/FeatureServer/0"
+        "https://services9.arcgis.com/uAyDtlCBvwXRl10Y/arcgis/rest/services/Accidente_Romania/FeatureServer"
     });
 
-    this.map.add(trailheadsLayer);
+    this.map.add(fogLayer);
+  }
 
-    // Trails feature layer (lines)
-    var trailsLayer: __esri.FeatureLayer = new this._FeatureLayer({
-      url:
-        "https://services3.arcgis.com/GVgbJbqm8hXASVYi/arcgis/rest/services/Trails/FeatureServer/0"
-    });
-
-    this.map.add(trailsLayer, 0);
-
-    // Parks and open spaces (polygons)
-    var parksLayer: __esri.FeatureLayer = new this._FeatureLayer({
-      url:
-        "https://services3.arcgis.com/GVgbJbqm8hXASVYi/arcgis/rest/services/Parks_and_Open_Space/FeatureServer/0"
-    });
-
-    this.map.add(parksLayer, 0);
-
-    console.log("feature layers added");
+  async logOut() {
+    await this.authenticationService.SignOut();
+    await this.router.navigate(['/login']);
   }
 
   addPoint(lat: number, lng: number, register: boolean) {
@@ -181,9 +285,9 @@ export class EsriMapComponent implements OnInit, OnDestroy {
     };
     const simpleMarkerSymbol = {
       type: "simple-marker",
-      color: [226, 119, 40],  // Orange
+      color: "blue",
       outline: {
-        color: [255, 255, 255], // White
+        color: "blue", // White
         width: 1
       }
     };
@@ -192,9 +296,30 @@ export class EsriMapComponent implements OnInit, OnDestroy {
       symbol: simpleMarkerSymbol
     });
 
-    this.graphicsLayer.add(pointGraphic);
-    if (register) {
-      this.pointGraphic = pointGraphic;
+    this.view.graphics.add(pointGraphic);
+  }
+
+  addLastSearchPoint() {
+    const lat = this.lastSearchedPoint.lat;
+    const lng = this.lastSearchedPoint.lng;
+    if (lat === undefined || lng === undefined) {
+      return;
+    }
+    this.destinationPoint = {
+      type: "point",
+      longitude: lng,
+      latitude: lat
+    };
+
+    this.graphicsLayer.removeAll();
+    this.addGraphic("destination", this.destinationPoint);
+
+    if (this.originPoint !== undefined) {
+      this.addGraphic("origin", this.originPoint);
+      console.log(this.destinationPoint)
+      console.log(this.originPoint)
+
+      this.getRoute();
     }
   }
 
@@ -250,32 +375,44 @@ export class EsriMapComponent implements OnInit, OnDestroy {
     }
   }
 
+  printLastSearch() {
+    if (this.lastSearchedPoint?.lat === undefined) {
+      return 'No last searches';
+    }
+    return 'Last search: ' + this.lastSearchedPoint.lat + ', ' + this.lastSearchedPoint.lng;
+  }
+
   connectFirebase() {
     if (this.isConnected) {
       return;
     }
     this.isConnected = true;
     this.fbs.connectToDatabase();
+    console.log("Connected to firebase");
     this.subscriptionList = this.fbs.getChangeFeedList().subscribe((items: ITestItem[]) => {
-      console.log("got new items from list: ", items);
-      this.graphicsLayer.removeAll();
+      this.view.graphics.removeAll();
       for (let item of items) {
-       // this.addPoint(item.lat, item.lng, false);
+        this.addPoint(item.lat, item.lng, false);
       }
     });
-    this.subscriptionObj = this.fbs.getChangeFeedObj().subscribe((stat: ITestItem[]) => {
-      console.log("item updated from object: ", stat);
+    this.subscriptionSearch = this.fbs.getChangeSearchFeed(this.email).subscribe((item: any) => {
+       this.lastSearchedPoint = {
+         lat: item[0].lat,
+         lng: item[0].lng,
+       };
     });
   }
 
   addPointItem() {
-    console.log("Map center: " + this.view.center.latitude + ", " + this.view.center.longitude);
-    this.fbs.addPointItem(this.view.center.latitude, this.view.center.longitude);
+    this.fbs.addPointItem(this.originPoint.latitude, this.originPoint.longitude);
   }
 
   disconnectFirebase() {
     if (this.subscriptionList != null) {
       this.subscriptionList.unsubscribe();
+    }
+    if (this.subscriptionSearch != null) {
+      this.subscriptionSearch.unsubscribe();
     }
     if (this.subscriptionObj != null) {
       this.subscriptionObj.unsubscribe();
@@ -284,12 +421,10 @@ export class EsriMapComponent implements OnInit, OnDestroy {
 
   ngOnInit() {
     // Initialize MapView and return an instance of MapView
-    console.log("initializing map");
     this.initializeMap().then(() => {
+      this.connectFirebase();
       // The map has been initialized
-      console.log("mapView ready: ", this.view.ready);
       this.loaded = this.view.ready;
-      this.runTimer();
     });
   }
 

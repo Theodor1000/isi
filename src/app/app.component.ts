@@ -13,25 +13,7 @@ interface ITab {
 })
 
 export class AppComponent {
-
-  tabs: ITab[] = [{
-    name: 'Home',
-    link: '/home'
-  }, {
-    name: 'Map',
-    link: '/map'
-  }];
-
-  activeTab = this.tabs[0].link;
-
-  constructor(private router: Router) {
-    this.router.events.subscribe((event: Event) => {
-      if (event instanceof NavigationEnd) {
-        this.activeTab = event.url;
-        console.log(event);
-      }
-    });
-  }
+  activeTab = '/map';
 
   // See app.component.html
   mapLoadedEvent(status: boolean) {

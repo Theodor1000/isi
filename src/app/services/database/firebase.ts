@@ -30,14 +30,26 @@ export class FirebaseService {
     getChangeFeedObj() {
         return this.objFeed;
     }
+    getChangeSearchFeed(email: string) {
+        return this.db.object(email).valueChanges();
+    }
 
     addPointItem(lat: number, lng: number) {
         let item: ITestItem = {
-            name: "test",
+            name: "police",
             lat: lat,
             lng: lng
         };
         this.db.list('list').push(item);
+    }
+
+    addLastSearch(email: string, lat: number, lng: number) {
+      let item = {
+        name: "search",
+        lat: lat,
+        lng: lng
+      };
+      this.db.object(email).set([item]);
     }
 
     syncPointItem(lat: number, lng: number) {
